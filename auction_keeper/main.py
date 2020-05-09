@@ -353,7 +353,7 @@ class AuctionKeeper:
         if not self.arguments.exit_gem_on_shutdown or not self.gem_join:
             return
 
-        self.collateral.approve(self.our_address, gas_price=self.gas_price)
+        #self.collateral.approve(self.our_address, gas_price=self.gas_price)
         token = Token(self.collateral.ilk.name.split('-')[0], self.collateral.gem.address, self.collateral.adapter.dec())
         vat_balance = self.vat.gem(self.ilk, self.our_address)
         if vat_balance > token.min_amount:
@@ -517,7 +517,7 @@ class AuctionKeeper:
                 else:
                     logging.warning(f"Processing {len(self.auctions.auctions)} auctions; ignoring auction {id}")
 
-        self.logger.info(f"Checked auctions {self.arguments.min_auction} to {self.strategy.kicks()} in " 
+        self.logger.debug(f"Checked auctions {self.arguments.min_auction} to {self.strategy.kicks()} in " 
                          f"{(datetime.now() - started).seconds} seconds")
 
     def check_for_bids(self):
