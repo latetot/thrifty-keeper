@@ -104,10 +104,10 @@ class AuctionKeeper:
 
         parser.add_argument("--model", type=str, required=True, nargs='+',
                             help="Commandline to use in order to start the bidding model")
-        parser.add_argument("--max-eth-balance", type=float, required=True,
-                            help="Max ETH balance to store in keeper account before selling for DAI") 
-        parser.add_argument("--max-eth-sale", type=float, required=True, 
-                            help="Max ETH to sell in a single transaction in order to reduce risk of slippage")
+        parser.add_argument("--max-gem-balance", type=float, required=True,
+                            help="Max gem (e.g. ETH, BAT) balance to store in keeper account before selling for DAI") 
+        parser.add_argument("--max-gem-sale", type=float, required=True, 
+                            help="Max gem (e.g. ETH, BAT) to sell in a single transaction in order to reduce risk of slippage")
         parser.add_argument("--profit-margin", type=float, default=0.01, 
                             help="Minimum percent discount from feed price for bidding")
         parser.add_argument("--tab-discount", type=float, nargs=4, 
@@ -156,8 +156,8 @@ class AuctionKeeper:
                 and self.arguments.from_block is None:
             raise RuntimeError("--from-block must be specified to kick off flop auctions")
 
-        if self.arguments.type != 'flip' and self.arguments.ilk != 'ETH-A':
-            raise RuntimeError("Thrifty Keeper only works with ETH-A Flip auctions")
+        if self.arguments.type != 'flip':
+            raise RuntimeError("Thrifty Keeper only works with Flip auctions")
         
         if self.arguments.profit_margin < 0 and not self.arguments.force_premium:
             raise RuntimeError("Negative profit margins will place bids above market price.  Run with '--force-premium' to override")
@@ -217,7 +217,7 @@ class AuctionKeeper:
                             level=(logging.DEBUG if self.arguments.debug else logging.INFO))
         
         ###Thrifty Keeper
-        self.balance_manager = Balance_Manager(self.our_address, self.web3, self.mcd, self.ilk, self.gem_join, self.vat_dai_target, self.arguments.max_eth_balance, self.arguments.max_eth_sale, self.arguments.profit_margin, self.arguments.tab_discount, self.arguments.bid_start_time)
+        self.balance_manager = Balance_Manager(self.our_address, self.web3, self.mcd, self.ilk, self.gem_join, self.vat_dai_target, self.arguments.max_gem_balance, self.arguments.max_gem_sale, self.arguments.profit_margin, self.arguments.tab_discount, self.arguments.bid_start_time)
 
         # Configure account(s) for which we'll deal auctions
         self.deal_all = False
@@ -284,6 +284,7 @@ class AuctionKeeper:
         #self.approve()
         #### Thrifty Keeper Start-up
         self.balance_manager.startup(self.gas_price)
+        #self.balance_manager.sell_gem_for_dai()
 
         if self.flapper:
             self.logger.info(f"MKR balance is {self.mkr.balance_of(self.our_address)}")
@@ -353,7 +354,7 @@ class AuctionKeeper:
         if not self.arguments.exit_gem_on_shutdown or not self.gem_join:
             return
 
-        #self.collateral.approve(self.our_address, gas_price=self.gas_price)
+        self.collateral.approve(self.our_address, gas_price=self.gas_price)
         token = Token(self.collateral.ilk.name.split('-')[0], self.collateral.gem.address, self.collateral.adapter.dec())
         vat_balance = self.vat.gem(self.ilk, self.our_address)
         if vat_balance > token.min_amount:
@@ -554,6 +555,7 @@ class AuctionKeeper:
             # If auction has already been removed, nothing happens.
             self.auctions.remove_auction(id)
             self.dead_auctions.add(id)
+            self.balance_manager.remove_auction(id)
             return False
 
         # Check if the auction is finished.  If so configured, `deal` the auction.

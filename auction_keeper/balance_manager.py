@@ -15,19 +15,16 @@ class Balance_Manager():
 
     logger = logging.getLogger()
 
-    def __init__(self, address, web3, dss, ilk, gem_join, vat_target, max_eth_balance, max_eth_sale, profit_margin, tab_discount, bid_start_time):
+    def __init__(self, address, web3, dss, ilk, gem_join, vat_target, max_gem_balance, max_gem_sale, profit_margin, tab_discount, bid_start_time):
         self.our_address = address
         self.web3 = web3
-        self.weth_address = Address(abis.weth_address)
-        self.weth_abi = abis.weth_abi
-        self.weth_contract = self.web3.eth.contract(address=abis.weth_address, abi=self.weth_abi)
         self.dss = dss
         self.dsr = Dsr(self.dss, self.our_address)
         self.ilk = ilk
         self.gem_join = gem_join
         self.vat_target = vat_target
-        self.max_eth_balance = max_eth_balance #max eth balance for keeper
-        self.max_eth_sale = max_eth_sale #max lot to sell in single transaction to avoid slippage
+        self.max_gem_balance = max_gem_balance #max gem (ETH, BAT) balance for keeper
+        self.max_gem_sale = max_gem_sale #max lot to sell in single transaction to avoid slippage
         self.profit_margin = profit_margin
         self.bid_start_time = bid_start_time
         self.start_time = time.time()
@@ -58,23 +55,26 @@ class Balance_Manager():
     
     def threader(self, func, gasprice):
         if func is 'unload':
-            vat_eth_balance = self.get_vat_eth_balance()
-            if vat_eth_balance > Wad.from_number(self.max_eth_balance):
-                threading.Thread(target=self.unload, args=(gasprice, vat_eth_balance),daemon=False).start()
+            vat_gem_balance = self.get_vat_gem_balance()
+            if vat_gem_balance > Wad.from_number(self.max_gem_balance):
+                threading.Thread(target=self.unload, args=(gasprice, vat_gem_balance),daemon=False).start()
             else:
                 return
         elif func is 'save':
+            time_elapse = time.time()-self.start_time
+            if time_elapse < 300: #dont withdraw on startup as may be auctions running
+                return
             vat_dai_balance = self.get_vat_balance()
             if vat_dai_balance == Wad(0): 
                 return
             else:
                 threading.Thread(target=self.save, args=(gasprice, vat_dai_balance),daemon=False).start() 
 
-    def unload(self, gasprice, vat_eth_balance):
+    def unload(self, gasprice, vat_gem_balance):
         self.check_gas_station(gasprice)
-        self.withdraw_eth(gasprice, vat_eth_balance)
+        self.withdraw_gem(gasprice, vat_gem_balance)
         self.unwrap_weth(gasprice)
-        self.sell_eth_for_dai()
+        self.sell_gem_for_dai()
     
     def save(self, gasprice, vat_dai_balance):
         self.vat_withdraw(gasprice, vat_dai_balance)
@@ -89,15 +89,17 @@ class Balance_Manager():
             else:
                 time.sleep(1)
     
-    def withdraw_eth(self, gasprice, vat_eth_balance):
-        self.logger.info(f"Exiting {round(vat_eth_balance.__float__(),3)} {self.ilk.name} from the Vat")
-        self.gem_join.exit(self.our_address, vat_eth_balance).transact(gas_price=gasprice)
+    def withdraw_gem(self, gasprice, vat_gem_balance):
+        self.logger.info(f"Exiting {round(vat_gem_balance.__float__(),3)} {self.ilk.name} from the Vat")
+        self.gem_join.exit(self.our_address, vat_gem_balance).transact(gas_price=gasprice)
        
         
     def unwrap_weth(self, gas_price):
-        weth_balance = self.weth_contract.functions.balanceOf(self.our_address.address).call()
+        weth_address = Address(abis.weth_address)
+        weth_contract = self.web3.eth.contract(address=abis.weth_address, abi=abis.weth_abi)
+        weth_balance = weth_contract.functions.balanceOf(self.our_address.address).call()
         if weth_balance > 0:
-            withdraw = Transact(self, self.web3, self.weth_abi, self.weth_address, self.weth_contract, 'withdraw', [weth_balance])
+            withdraw = Transact(self, self.web3, abis.weth_abi, weth_address, weth_contract, 'withdraw', [weth_balance])
             withdraw.transact (gas_price=gas_price)
             time.sleep(1)
             eth_balance = self.web3.eth.getBalance(self.our_address.address)
@@ -119,8 +121,8 @@ class Balance_Manager():
         logging.info(f"Base bid profit margin = {round(self.profit_margin*100, 3)}%")
         logging.info(f"Bid profit margin = {round((self.profit_margin + self.low_discount)*100, 3)}% when the sum of all active auction tabs is > {low_threshold} DAI")
         logging.info(f"Bid profit margin = {round((self.profit_margin + self.high_discount)*100, 3)}% when the sum of all active auction tabs is > {high_threshold} DAI")
-        logging.info(f"If you win an auction, the ETH collateral will be sold until there is {self.max_eth_balance} ETH remaining in your keeper account ")
-        logging.info(f"Max ETH sale amount in a single transaction is {self.max_eth_sale} ETH")
+        logging.info(f"If you win an auction, the collateral will be sold until there is {self.max_gem_balance} {self.ilk.name} remaining in your keeper account ")
+        logging.info(f"Max gem sale amount in a single transaction is {self.max_gem_sale} {self.ilk.name}")
         logging.info(f"You will not submit bids until there are less than {self.bid_start_time}m left in the auction")
         logging.info(f"*****")
         
@@ -129,13 +131,13 @@ class Balance_Manager():
         dsr_balance = self.get_dsr_balance().__float__()
         eth_balance = self.web3.eth.getBalance(self.our_address.address)/1e18
         vat_balance = self.get_vat_balance().__float__()
-        vat_eth_balance = self.get_vat_eth_balance().__float__()
+        vat_gem_balance = self.get_vat_gem_balance().__float__()
         vat_target = self.vat_target.__float__()
         self.logger.info(f"Keeper Dai Balance =  {round(dai_balance,2)}")
         self.logger.info(f"Keeper DSR Balance = {round(dsr_balance,1)}")
         logging.info(f"Keeper ETH Balance = {round(eth_balance, 3)}")
         self.logger.info(f"Vat DAI Balance = {round(vat_balance,3)}")
-        logging.info(f"Vat ETH Balance = {round(vat_eth_balance, 3)}")
+        logging.info(f"Vat {self.ilk.name} Balance = {round(vat_gem_balance, 3)}")
         self.logger.info(f"Vat DAI Target = {round(vat_target,1)}")
 
     def get_dai_balance(self):
@@ -151,7 +153,7 @@ class Balance_Manager():
     def get_vat_balance(self):
         return Wad(self.dss.vat.dai(self.our_address))
     
-    def get_vat_eth_balance(self):
+    def get_vat_gem_balance(self):
         return Wad(self.dss.vat.gem(self.ilk, self.our_address))
 
     def add_tab(self):
@@ -201,11 +203,11 @@ class Balance_Manager():
             logging.info(f"Time left: {int(time_left/60)}m")
             logging.info(f"Auction tab: {round(self.auction_tab[auction_id].__float__(),3)} DAI")
             logging.info(f"Total of {num_auctions} active auctions for {round(tot_tab.__float__(), 3)} DAI. Tab discount: {tab_discount*100}%")
-            logging.info(f"Lot size: {round(lot,4)} ETH")
+            logging.info(f"Lot size: {round(lot,4)} {self.ilk.name}")
             self.logger.info(f"Gas cost: {round(gas_cost_dai, 3)} DAI")
-            self.logger.info (f"Market feed price: {round(feed_price, 2)} ETH/DAI")
-            self.logger.info(f"Current bid price: {round(current_price, 2)} ETH/DAI")
-            self.logger.info(f"Your profit price: {round(profit_price_daieth, 2)} ETH/DAI")
+            self.logger.info (f"Market feed price: {round(feed_price, 2)} {self.ilk.name}/DAI")
+            self.logger.info(f"Current bid price: {round(current_price, 2)} {self.ilk.name}/DAI")
+            self.logger.info(f"Your profit price: {round(profit_price_daieth, 2)} {self.ilk.name}/DAI")
             self.logger.info(f"Current bid profit margin: {round(margin, 2)} %")
             logging.info(f"Your min profit margin: {round(((self.profit_margin+tab_discount)*100), 2)}% ")
             if profit_price_daieth > current_price:
@@ -226,7 +228,7 @@ class Balance_Manager():
         def calc_margin():
 
             #Estimate gas costs in dai of exiting DSR, bidding, selling, redeposit
-            gp = gas_price.get_gas_price(61) #fast gas price
+            gp = gas_price.get_gas_price(1) #fast gas price
             gas_cost_dai = self.round_trip_gas * feed_price * gp * 1e-18
             
             #Determine profit margin to discount feed_price
@@ -240,7 +242,7 @@ class Balance_Manager():
             #Profit margin of current bid
             margin =  (sell_amt_dai - bid_dai)/bid_dai * 100
 
-            #Price per ETH that provides target profit margin after gas costs 
+            #Price per gem that provides target profit margin after gas costs 
             profit_price_daieth = (sell_amt_dai-((1+target_margin)*gas_cost_dai))/((1+target_margin)*lot)
             
             if profit_price_daieth > current_price * beg:
@@ -307,12 +309,14 @@ class Balance_Manager():
             return None
 
 
-    def sell_eth_for_dai(self):
+    def sell_gem_for_dai(self):
+
+        token = self.ilk.name.split('-')
 
         def get0x(sell_amount):
             parameters = {
             'buyToken' : 'DAI',
-            'sellToken' : 'ETH',
+            'sellToken' : token[0],
             'sellAmount' : str(int(sell_amount))
             }
             url = 'https://api.0x.org/swap/v0/quote'
@@ -331,26 +335,33 @@ class Balance_Manager():
                 return False
             
         def determine_sale_info(balance):
-            total_sell = (balance - self.max_eth_balance)/1e18
-            if total_sell > self.max_eth_sale:
-                num_sales = int(total_sell/self.max_eth_sale) + 1
+            total_sell = (balance - self.max_gem_balance)/1e18
+            if total_sell > self.max_gem_sale:
+                num_sales = int(total_sell/self.max_gem_sale) + 1
             else:
                 num_sales = 1
             sale_amount = total_sell/num_sales*1e18
             return (sale_amount, num_sales)
+        
+        def get_act_balance():
+            if token[0] == 'BAT':
+                bat_contract = self.web3.eth.contract(address=abis.bat_address, abi=abis.bat_abi)
+                return bat_contract.functions.balanceOf(self.our_address.address).call()
+            elif token[0] == 'ETH':
+                return self.web3.eth.getBalance(self.our_address.address)
 
         while True:
-            balance = self.web3.eth.getBalance(self.our_address.address)
-            self.logger.info(f"ETH balance: {round(balance/1e18,3)}")
-            if balance > self.web3.toWei(self.max_eth_balance, 'ether'):
+            balance = get_act_balance()
+            self.logger.info(f"{token[0]} balance: {round(balance/1e18,3)}")
+            if balance > self.web3.toWei(self.max_gem_balance, 'ether'):
                 (sell_amount, num_sales) = determine_sale_info(balance)
-                tot_sale = round((balance/1e18 - self.max_eth_balance), 3)
-                self.logger.info(f"Selling {tot_sale} ETH for DAI to maintain {self.max_eth_balance} ETH in account")
+                tot_sale = round((balance/1e18 - self.max_gem_balance), 3)
+                self.logger.info(f"Selling {tot_sale} {token[0]} for DAI to maintain {self.max_gem_balance} {token[0]} in account")
                 for x in range (num_sales):
                     self.logger.info(f"Checking 0x API")
                     txdict = get0x(sell_amount)
                     if txdict:
-                        self.logger.info(f"Selling {round(sell_amount/1e18,3)} ETH")
+                        self.logger.info(f"Selling {round(sell_amount/1e18,3)} {token[0]}")
                         txhash = self.web3.eth.sendTransaction(txdict)
                         self.web3.eth.waitForTransactionReceipt(txhash)
                         self.logger.info(f"Done")
@@ -361,7 +372,7 @@ class Balance_Manager():
                         self.logger.info(f"0x down")
                 self.log_balances()   
             else:
-                self.logger.info(f"Keeper balance <= {self.max_eth_balance} ETH")
+                self.logger.info(f"Keeper balance <= {self.max_gem_balance} {token[0]}")
                 break
         
     
@@ -438,6 +449,8 @@ class Balance_Manager():
             del self.auction_tab[id]
         if id in self.bid_checker.keys():
             del self.bid_checker[id]
+        if id in self.auc_withdraw.keys():
+            del self.auc_withdraw[id]
     
     
         
