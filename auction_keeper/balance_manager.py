@@ -15,7 +15,7 @@ class Balance_Manager():
 
     logger = logging.getLogger()
 
-    def __init__(self, address, web3, dss, ilk, gem_join, vat_target, max_gem_balance, max_gem_sale, profit_margin, tab_discount, bid_start_time):
+    def __init__(self, address, web3, dss, ilk, gem_join, vat_target, max_gem_balance, max_gem_sale, gem_eth_ratio, profit_margin, tab_discount, bid_start_time):
         self.our_address = address
         self.web3 = web3
         self.dss = dss
@@ -25,6 +25,7 @@ class Balance_Manager():
         self.vat_target = vat_target
         self.max_gem_balance = max_gem_balance #max gem (ETH, BAT) balance for keeper
         self.max_gem_sale = max_gem_sale #max lot to sell in single transaction to avoid slippage
+        self.gem_eth_ratio = gem_eth_ratio
         self.profit_margin = profit_margin
         self.bid_start_time = bid_start_time
         self.start_time = time.time()
@@ -229,7 +230,11 @@ class Balance_Manager():
 
             #Estimate gas costs in dai of exiting DSR, bidding, selling, redeposit
             gp = gas_price.get_gas_price(1) #fast gas price
-            gas_cost_dai = self.round_trip_gas * feed_price * gp * 1e-18
+            if self.ilk.name == 'BAT-A':
+                gas_price_eth = feed_price * self.gem_eth_ratio
+            else:
+                gas_price_eth = feed_price
+            gas_cost_dai = self.round_trip_gas * gas_price_eth * gp * 1e-18
             
             #Determine profit margin to discount feed_price
             tab_discount = self.get_tab_discount() #additional discount when large CDPs are being auctioned
@@ -241,7 +246,6 @@ class Balance_Manager():
             bid_dai = (lot * current_price) + gas_cost_dai
             #Profit margin of current bid
             margin =  (sell_amt_dai - bid_dai)/bid_dai * 100
-
             #Price per gem that provides target profit margin after gas costs 
             profit_price_daieth = (sell_amt_dai-((1+target_margin)*gas_cost_dai))/((1+target_margin)*lot)
             
@@ -340,7 +344,7 @@ class Balance_Manager():
                 num_sales = int(total_sell/self.max_gem_sale) + 1
             else:
                 num_sales = 1
-            sale_amount = total_sell/num_sales*1e18
+            sale_amount = round(total_sell/num_sales)*1e18
             return (sale_amount, num_sales)
         
         def get_act_balance():
@@ -349,9 +353,11 @@ class Balance_Manager():
                 return bat_contract.functions.balanceOf(self.our_address.address).call()
             elif token[0] == 'ETH':
                 return self.web3.eth.getBalance(self.our_address.address)
-
-        while True:
+        z=True
+        while z == True:
+            logging.info(f"{z}")
             balance = get_act_balance()
+            dai_balance = self.get_dai_balance()
             self.logger.info(f"{token[0]} balance: {round(balance/1e18,3)}")
             if balance > self.web3.toWei(self.max_gem_balance, 'ether'):
                 (sell_amount, num_sales) = determine_sale_info(balance)
@@ -364,13 +370,19 @@ class Balance_Manager():
                         self.logger.info(f"Selling {round(sell_amount/1e18,3)} {token[0]}")
                         txhash = self.web3.eth.sendTransaction(txdict)
                         self.web3.eth.waitForTransactionReceipt(txhash)
-                        self.logger.info(f"Done")
-                        if (num_sales - x) > 1:
-                            time.sleep(60)
+                        new_dai_balance = self.get_dai_balance()
+                        if dai_balance == new_dai_balance:
+                            logging.info ("Transaction failed")
+                            z=False
+                            break
+                        else:
+                            self.logger.info(f"Done")
+                            if (num_sales - x) > 1:
+                                time.sleep(60)
                     else:
                         time.sleep(1)
                         self.logger.info(f"0x down")
-                self.log_balances()   
+                self.log_balances()
             else:
                 self.logger.info(f"Keeper balance <= {self.max_gem_balance} {token[0]}")
                 break
@@ -421,14 +433,20 @@ class Balance_Manager():
             return False
 
         else:
+            
             max_add = self.vat_target - self.get_vat_balance()
             need_to_bid = amt - self.get_vat_balance()
+
+            tot = need_to_bid + Wad.from_number(1) 
+
             if need_to_bid > max_add:
-                tot = max_add       
-            if need_to_bid > self.get_dsr_balance():
+                tot = max_add + Wad.from_number(1) 
+
+            if need_to_bid > self.get_dsr_balance() and self.get_tab_discount() < self.high_discount:
+                return False #don't waste gas to bid unless above high tab limit
+            elif need_to_bid > self.get_dsr_balance() and self.get_tab_discount() == self.high_discount:
                 tot = self.get_dsr_balance()          
-            else:
-                tot = need_to_bid         
+            
             if tot < Wad.from_number(.001): #avoid withdraw due to rounding errors
                 return False
             self.logger.info(f"Withdrawing {tot} Dai from DSR")

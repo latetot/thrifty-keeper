@@ -108,6 +108,8 @@ class AuctionKeeper:
                             help="Max gem (e.g. ETH, BAT) balance to store in keeper account before selling for DAI") 
         parser.add_argument("--max-gem-sale", type=float, required=True, 
                             help="Max gem (e.g. ETH, BAT) to sell in a single transaction in order to reduce risk of slippage")
+        parser.add_argument("--gem-eth-ratio", type=float, default=1, 
+                            help="gem/eth ratio for estimating gas price")
         parser.add_argument("--profit-margin", type=float, default=0.01, 
                             help="Minimum percent discount from feed price for bidding")
         parser.add_argument("--tab-discount", type=float, nargs=4, 
@@ -217,7 +219,7 @@ class AuctionKeeper:
                             level=(logging.DEBUG if self.arguments.debug else logging.INFO))
         
         ###Thrifty Keeper
-        self.balance_manager = Balance_Manager(self.our_address, self.web3, self.mcd, self.ilk, self.gem_join, self.vat_dai_target, self.arguments.max_gem_balance, self.arguments.max_gem_sale, self.arguments.profit_margin, self.arguments.tab_discount, self.arguments.bid_start_time)
+        self.balance_manager = Balance_Manager(self.our_address, self.web3, self.mcd, self.ilk, self.gem_join, self.vat_dai_target, self.arguments.max_gem_balance, self.arguments.max_gem_sale, self.arguments.gem_eth_ratio, self.arguments.profit_margin, self.arguments.tab_discount, self.arguments.bid_start_time)
 
         # Configure account(s) for which we'll deal auctions
         self.deal_all = False
@@ -556,6 +558,8 @@ class AuctionKeeper:
             self.auctions.remove_auction(id)
             self.dead_auctions.add(id)
             self.balance_manager.remove_auction(id)
+            if len(self.auctions.auctions)==0:
+                self.balance_manager.threader('save', self.gas_price)
             return False
 
         # Check if the auction is finished.  If so configured, `deal` the auction.
@@ -617,6 +621,7 @@ class AuctionKeeper:
         bid_price, bid_transact, cost = self.strategy.bid(id, managed_price)
         # If we can't afford the bid, log a warning/error and back out.
         # By continuing, we'll burn through gas fees while the keeper pointlessly retries the bid.
+        logging.info(f"should bid @ {bid_price} {cost}")
 
         if cost is not None:
             if not self.check_bid_cost(cost):
@@ -628,7 +633,7 @@ class AuctionKeeper:
 
             # if no transaction in progress, send a new one
             transaction_in_progress = auction.transaction_in_progress()
-
+            logging.info(f"should be bidding")
             # if transaction has not been submitted...
             if transaction_in_progress is None:
                 self.logger.info(f"Sending new bid @{managed_price} (gas_price={output.gas_price})")
@@ -681,7 +686,7 @@ class AuctionKeeper:
         if self.flipper or self.flopper:
             vat_dai = self.vat.dai(self.our_address)
             if cost > vat_dai:
-                self.logger.debug(f"Bid cost {str(cost)} exceeds vat balance of {vat_dai}; "
+                self.logger.info(f"Bid cost {str(cost)} exceeds vat balance of {vat_dai}; "
                                   "bid will not be submitted")
                 return False
         # If this is an auction where we bid with MKR...
