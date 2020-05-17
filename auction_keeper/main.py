@@ -284,10 +284,11 @@ class AuctionKeeper:
                   f" {self.arguments.type} auctions once reached"
 
     def startup(self):
-        #self.approve()
+        self.approve()
         #### Thrifty Keeper Start-up
         self.balance_manager.startup(self.gas_price)
         #self.balance_manager.sell_gem_for_dai()
+        self.balance_manager.threader('save', self.gas_price)
 
         if self.flapper:
             self.logger.info(f"MKR balance is {self.mkr.balance_of(self.our_address)}")
@@ -328,7 +329,10 @@ class AuctionKeeper:
         self.strategy.approve(gas_price=self.gas_price)
         time.sleep(2)
         if self.dai_join:
-            self.mcd.approve_dai(usr=self.our_address, gas_price=self.gas_price)
+            if self.mcd.dai.allowance_of(self.our_address, self.dai_join.address) > Wad.from_number(2**50):
+                return
+            else:
+                self.mcd.approve_dai(usr=self.our_address, gas_price=self.gas_price)
 
     def shutdown(self):
         if len(self.auctions.auctions)==0:
@@ -559,10 +563,7 @@ class AuctionKeeper:
             # Try to remove the auction so the model terminates and we stop tracking it.
             # If auction has already been removed, nothing happens.
             self.auctions.remove_auction(id)
-            self.dead_since[id] = current_block
-            self.balance_manager.remove_auction(id)
-            if len(self.auctions.auctions)==0:
-                self.balance_manager.threader('save', self.gas_price)       
+            self.dead_since[id] = current_block       
             return False
 
         # Check if the auction is finished.  If so configured, `deal` the auction.

@@ -44,6 +44,8 @@ class Balance_Manager():
         self.high_discount = tab_discount[1]
         self.low_threshold = tab_discount[2]
         self.low_discount = tab_discount[3]
+        self.saving = False
+        self.unloading = False
 
     def startup(self, gasprice):
         logging.info(f"")
@@ -57,7 +59,8 @@ class Balance_Manager():
     def threader(self, func, gasprice):
         if func is 'unload':
             vat_gem_balance = self.get_vat_gem_balance()
-            if vat_gem_balance > Wad.from_number(self.max_gem_balance):
+            if vat_gem_balance > Wad.from_number(self.max_gem_balance) and not self.unloading:
+                self.unloading = True
                 threading.Thread(target=self.unload, args=(gasprice, vat_gem_balance),daemon=False).start()
             else:
                 return
@@ -65,21 +68,26 @@ class Balance_Manager():
             time_elapse = time.time()-self.start_time
             if time_elapse < 300: #dont withdraw on startup as may be auctions running
                 return
+            act_dai_balance = self.get_dai_balance()
             vat_dai_balance = self.get_vat_balance()
-            if vat_dai_balance == Wad(0): 
+            if (vat_dai_balance == Wad(0) and act_dai_balance == Wad(0)) or self.saving: 
                 return
             else:
-                threading.Thread(target=self.save, args=(gasprice, vat_dai_balance),daemon=False).start() 
+                self.saving = True
+                threading.Thread(target=self.save, args=(gasprice, vat_dai_balance),daemon=False).start()
+                 
 
     def unload(self, gasprice, vat_gem_balance):
         self.check_gas_station(gasprice)
         self.withdraw_gem(gasprice, vat_gem_balance)
         self.unwrap_weth(gasprice)
         self.sell_gem_for_dai()
+        self.unloading = False
     
     def save(self, gasprice, vat_dai_balance):
         self.vat_withdraw(gasprice, vat_dai_balance)
         self.dsr_add(gasprice)
+        self.saving = False
     
     def check_gas_station(self, gasprice):
         while True:
@@ -457,10 +465,11 @@ class Balance_Manager():
             return True
     
     def vat_withdraw(self, gas_price, vat_dai_balance):
-        self.logger.info(f"Exiting {round(vat_dai_balance.__float__(), 3)} Dai from the Vat to deposit in the DSR")
-        self.dss.dai_adapter.exit(self.our_address, vat_dai_balance).transact(gas_price=gas_price)
-        time.sleep(2)
-        self.log_balances()
+        if vat_dai_balance > 0:
+            self.logger.info(f"Exiting {round(vat_dai_balance.__float__(), 3)} Dai from the Vat to deposit in the DSR")
+            self.dss.dai_adapter.exit(self.our_address, vat_dai_balance).transact(gas_price=gas_price)
+            time.sleep(2)
+            self.log_balances()
     
     def remove_auction (self,id):
         if id in self.auction_tab.keys():
